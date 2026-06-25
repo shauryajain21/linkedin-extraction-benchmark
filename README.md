@@ -2,11 +2,28 @@
 
 How well do web-search / answer APIs extract a **specific person's** LinkedIn profile when you hand them the exact profile URL?
 
-We gave four APIs — **Linkup, Exa, Perplexity, Parallel** — the same tasks across **500 real LinkedIn profiles** and ran three evals:
+We gave four APIs — **Linkup, Exa, Perplexity, Parallel** — the same tasks across real LinkedIn profiles and ran four evals:
 
 1. **Completeness** — did it fill the fields we asked for?
 2. **Correctness** — is it the *right person*, with data matching ground truth?
 3. **Pre-meeting brief quality** — turn each engine's *raw web results* into a sales brief; which one actually preps you for the meeting? *(separate task, n=100 — see [Eval 3](#eval-3--pre-meeting-brief-quality-a-different-task))*
+4. **Freshness** — for people who *just changed jobs*, does it surface the NEW company or the stale old one? *(n=57 — see [Eval 4](#eval-4--freshness--recent-job-change-detection))*
+
+## TL;DR
+
+**Linkup wins all four evals.** Because it *fetches the URL you hand it* instead of searching for the name, it gets the right person 94% of the time; the search-based APIs return *a person with the right name at the wrong company* on 36–44% of profiles — and when someone just changed jobs, they report the **stale** old employer.
+
+| | Completeness (n=500) | Right person (n=500) | Wrong (namesake) | Brief quality (n=100) | Catches job change (n=57) |
+|---|---|---|---|---|---|
+| **Linkup** | **96.5** | **94%** | **12** | **64.8** | **74%** |
+| Perplexity | 73.7 | 64% | 122 | 53.1 | 9% |
+| Exa | 71.9 | 56% | 191 | 55.8 | 14% |
+| Parallel | 60.5 | 63% | 69 | 59.8 | 11% |
+
+- **Completeness** — Linkup fills 96.5/100 of requested fields; next best is 73.7.
+- **Correctness** — Linkup returns the wrong person only 12/500 times; Exa does 191/500 (38%).
+- **Brief quality** — judged by Opus 4.8 on freshness + specificity + actionability, Linkup produces the best pre-meeting brief for 51 of 100 people.
+- **Freshness** — for 57 people who just changed jobs, Linkup reports the new employer 74% of the time; the others land on the *previous* company and report it as current (Exa/Parallel are STALE on ~30/57).
 
 ---
 
@@ -51,6 +68,11 @@ Matching is token-set with company-suffix stripping (e.g. `Capital Bancorp Plc` 
 
 ## Results (n = 500)
 
+> ### 💼 GTM use case: CRM enrichment
+> You have a list of LinkedIn URLs — inbound leads, a conference attendee list, a book of accounts — and you want to **enrich each contact** with title, company, location, and work history written back into Salesforce/HubSpot. This is exactly the extraction task, and it's where **completeness** and **correctness** both matter:
+> - **Completeness = field coverage.** An enrichment that returns `title` and `location` but leaves `company` and `experience` empty is a half-filled record a rep still has to finish by hand. Linkup fills **96.5%** of requested fields vs **60–74%** for the others.
+> - **Correctness = not poisoning the CRM.** Writing a *namesake's* company into a contact record is worse than leaving it blank — now the rep trusts bad data and emails the wrong account. Linkup writes the wrong company only **12/500** times; Exa does it **191/500** (38%). At scale, that's the difference between a clean database and one a third of your team has learned to distrust.
+
 ### Completeness
 | Provider | Mean | Median | Fully empty |
 |---|---|---|---|
@@ -87,6 +109,9 @@ The three search-based APIs spend a large share of their bar on the **wrong pers
 
 ## Eval 3 — Pre-meeting brief quality (a different task)
 
+> ### 💼 GTM use case: account research before a sales call
+> A rep has a meeting with a prospect in 30 minutes and opens their LinkedIn. They don't need a structured dump of fields — they need a **brief**: what has this person been posting about, what changed at their company recently, and *what should I actually ask them*. The engine that surfaces a post from last week and a just-announced funding round preps the rep to walk in warm; the one that returns a 2019 job title preps them for a meeting that already happened. That's what this eval measures — and why **freshness** is weighted heaviest.
+
 Extraction is one job; **prepping for a meeting** is another. Here each engine is hit at its **raw web-results endpoint** (Linkup `/v1/search` searchResults · Exa `/search`+highlights · Perplexity `/search` · Parallel `/v1/search`, 20 results each), and a **Sonnet synthesizer** turns those results into a pre-meeting brief — *notes* + *conversation questions* — using only what the API returned.
 
 An **Opus 4.8 judge** then scores each brief the way a salesperson would: *holding all four briefs, which one preps me better to walk into the meeting right now?* The rubric is weighted and ground-truth-anchored:
@@ -119,6 +144,38 @@ overall = freshness*0.35 + specificity*0.30 + actionability*0.35     (capped at 
 
 ---
 
+## Eval 4 — Freshness / recent job-change detection
+
+> ### 💼 GTM use case: job-change signals
+> A person leaving a customer account for a new company is one of the highest-value sales triggers there is — your champion just landed somewhere new and might buy again. But the signal is only useful if it's **fresh**: an enrichment that still shows their *old* employer doesn't just fail to help, it tells you to call the wrong company.
+
+This is a targeted subset of **57 people who all just changed jobs** (most with a current-role start in the current month). Each engine gets the person's *old* role and is asked — via its native structured output — for their **current** employer/title and whether they changed companies. The test: does it surface the **new** job, or the **stale** old one?
+
+Because company names appear in different languages, transliterations, and abbreviations across sources (an Arabic company name vs its English equivalent, `JP Morgan` vs `J.P. Morgan`), string matching misclassifies real matches — so an **Opus 4.8 judge** classifies each engine against the verified new + previous role:
+
+- **FRESH** — reported the NEW current company (caught the change) ← the goal
+- **STALE** — found the right person but reported the PREVIOUS company (missed the change)
+- **WRONG_PERSON** — namesake / a company matching neither
+- **NOT_FOUND** — abstained / empty
+
+### Results (n = 57)
+
+| Engine | FRESH | STALE | WRONG | Not found | **Fresh %** | Change flagged ✓ |
+|---|---|---|---|---|---|---|
+| **Linkup** | **42** | 7 | 4 | 4 | **74%** | 37 |
+| Exa | 8 | 32 | 11 | 6 | 14% | 10 |
+| Parallel | 6 | 30 | 11 | 10 | 11% | 17 |
+| Perplexity | 5 | 17 | 7 | 28 | 9% | 6 |
+
+### What it means
+- **Linkup catches the job change 74% of the time**; the next best is 14%.
+- The others' dominant failure mode is **STALE** (Exa 32, Parallel 30 of 57): they *find the right person* but report the **previous** employer as current — the worst outcome for a job-change signal, because it looks confident and is wrong. Perplexity mostly abstains (28 not-found).
+- Same root cause as Evals 1–2: fetching the live profile surfaces the move; searching the name lands on cached/old pages.
+
+> The deterministic English-only version of this check scored Linkup 35 and slightly **over**-credited the others — cross-language judging corrected it to 42 (Linkup) and *down* for the rest. The LLM judge is the fair call here.
+
+---
+
 ## Run it yourself
 
 ```bash
@@ -143,22 +200,36 @@ python3 eval_meeting_briefs.py --rejudge  # re-runs the Opus 4.8 judge (needs `a
 
 The judge verdicts are cached in `results/brief_judge_raw.json`, so the scores reproduce exactly without re-calling the API. Scoring/aggregation is deterministic from those verdicts.
 
+For the freshness / job-change eval (Eval 4):
+
+```bash
+python3 eval_freshness.py            # rebuilds results/freshness_judge.xlsx from cached judge verdicts (no API key needed)
+python3 eval_freshness.py --rejudge  # re-runs the Opus 4.8 judge (needs `anthropic` + ANTHROPIC_API_KEY)
+```
+
+Verdicts cached in `results/jc_judge_raw.json`.
+
 ---
 
 ## Files
 
 ```
 data/
-  api_outputs_500.csv    # extraction: each API's structured response per profile
-  ground_truth_500.csv   # authoritative profile fields per linkedin_url (the source of truth)
-  brief_outputs_100.csv  # meeting-brief: each engine's synthesized brief (notes + questions) per person
+  api_outputs_500.csv             # extraction: each API's structured response per profile
+  ground_truth_500.csv            # authoritative profile fields per linkedin_url (the source of truth)
+  brief_outputs_100.csv           # meeting-brief: each engine's synthesized brief (notes + questions) per person
+  jc_outputs_57.csv               # freshness: each engine's structured response for 57 recent job-changers
+  job_change_ground_truth_57.csv  # verified new + previous role per job-changer
 eval.py                  # Evals 1 & 2 (completeness + correctness), writes benchmark_500.xlsx
 eval_meeting_briefs.py   # Eval 3 (brief quality), writes meeting_brief_judge.xlsx
+eval_freshness.py        # Eval 4 (job-change freshness), writes freshness_judge.xlsx
 make_charts.py           # regenerates charts/*.png from the same data
 results/
   benchmark_500.xlsx       # extraction report
   meeting_brief_judge.xlsx # brief-quality report (Summary + Per-person)
+  freshness_judge.xlsx     # job-change freshness report (Summary + Per-person)
   brief_judge_raw.json     # cached Opus judge verdicts (so Eval 3 reproduces without an API key)
+  jc_judge_raw.json        # cached Opus judge verdicts for Eval 4
 charts/
   completeness.png       # mean completeness per provider
   correctness.png        # right / wrong / empty, stacked, per provider
